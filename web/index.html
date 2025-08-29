@@ -1,0 +1,518 @@
+<!doctype html>
+<html class="dark">
+<head>
+  <meta charset="utf-8" />
+  <title>Fast Annotator (Single‑File)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            dark: {
+              bg: '#0b0c0f',
+              panel: '#0f1216',
+              border: '#22272e',
+              text: '#e8e8e8',
+              muted: '#aeb4bc',
+              btn: '#171b21',
+              'btn-hover': '#20262e'
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    html, body { height: 100%; }
+    .layer { position: absolute; left: 0; top: 0; }
+  </style>
+</head>
+<body class="m-0 h-full font-system bg-dark-bg text-dark-text dark:bg-dark-bg dark:text-dark-text">
+  <!-- Theme Toggle Button -->
+  <button id="themeToggle" class="fixed top-4 right-4 z-50 p-2 bg-white dark:bg-dark-btn border border-gray-300 dark:border-dark-border rounded-lg hover:bg-gray-100 dark:hover:bg-dark-btn-hover transition-colors">
+    <svg class="w-5 h-5 text-gray-800 dark:text-dark-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path class="dark:hidden" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+      <path class="hidden dark:block" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707"/>
+    </svg>
+  </button>
+  
+  <header class="sticky top-0 z-10 bg-white dark:bg-dark-bg border-b border-gray-200 dark:border-dark-border p-4">
+    <div class="flex flex-wrap items-center gap-3">
+      <button id="btnCapture" class="px-3 py-2 bg-blue-600 text-white border border-blue-600 rounded-lg hover:bg-blue-700 cursor-pointer">Capture this tab</button>
+      <button id="btnFreeze" disabled class="px-3 py-2 bg-gray-200 dark:bg-dark-btn text-gray-800 dark:text-dark-text border border-gray-300 dark:border-dark-border rounded-lg hover:bg-gray-300 dark:hover:bg-dark-btn-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Freeze frame</button>
+      <button id="btnClear" disabled class="px-3 py-2 bg-gray-200 dark:bg-dark-btn text-gray-800 dark:text-dark-text border border-gray-300 dark:border-dark-border rounded-lg hover:bg-gray-300 dark:hover:bg-dark-btn-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Clear rectangles</button>
+      <button id="btnSave" disabled class="px-3 py-2 bg-green-600 text-white border border-green-600 rounded-lg hover:bg-green-700 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Save (PNG + TXT)</button>
+      <span class="text-gray-700 dark:text-dark-text">Current number: <span id="nnn" class="bg-red-600 text-white font-bold px-2 py-1 rounded">---</span></span>
+    </div>
+  </header>
+
+  <div class="grid grid-cols-1 lg:grid-cols-[1fr_340px] min-h-[calc(100vh-64px)]">
+    <div class="relative bg-gray-100 dark:bg-gray-900 border-r border-gray-200 dark:border-dark-border flex items-center justify-center overflow-auto" id="stage">
+      <video id="video" autoplay playsinline style="max-width:100%; max-height:80vh; display:none;"></video>
+      <canvas id="base" class="layer"></canvas>
+      <canvas id="draw" class="layer"></canvas>
+    </div>
+    <div class="bg-white dark:bg-dark-panel p-3">
+      <div class="my-3 text-sm text-gray-600 dark:text-dark-muted">
+        After clicking <b>Capture this tab</b>, select your <span class="font-mono bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 px-2 py-1 rounded text-xs">localhost:5173</span> tab. Hit <b>Freeze</b>, then draw rectangles. Save when ready.
+      </div>
+      <div class="my-3">
+        <label for="note" class="block text-sm font-medium text-gray-700 dark:text-dark-text mb-2">Notes to save in <span class="font-mono bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 px-2 py-1 rounded text-xs">iteration-NNN.txt</span>:</label>
+        <textarea id="note" placeholder="What to change... (copy edits, spacing, component bugs, etc.)" class="w-full h-60 bg-white dark:bg-gray-900 text-gray-900 dark:text-dark-text border border-gray-300 dark:border-dark-border p-3 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+      </div>
+      <div class="my-3 text-sm text-gray-600 dark:text-dark-muted">
+        Tips: Hold & drag to draw. <span class="font-mono bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 px-2 py-1 rounded text-xs">Esc</span> cancels a drag. Shortcuts: <span class="font-mono bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 px-2 py-1 rounded text-xs">F</span>=Freeze/Unfreeze, <span class="font-mono bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 px-2 py-1 rounded text-xs">S</span>=Save, <span class="font-mono bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 px-2 py-1 rounded text-xs">C</span>=Clear.
+      </div>
+      <div class="mt-4">
+        <div class="text-sm font-semibold text-gray-900 dark:text-dark-text mb-2">Command Output</div>
+        <div id="console" class="bg-gray-900 dark:bg-black border border-gray-300 dark:border-dark-border rounded-lg p-3 font-mono text-xs leading-relaxed text-gray-100 min-h-[120px] max-h-[300px] overflow-y-auto whitespace-pre-wrap">
+          <div class="text-gray-400 dark:text-dark-muted italic">No commands executed yet...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // Elements
+  const btnCapture = document.getElementById('btnCapture');
+  const btnFreeze  = document.getElementById('btnFreeze');
+  const btnClear   = document.getElementById('btnClear');
+  const btnSave    = document.getElementById('btnSave');
+  const nnnBadge   = document.getElementById('nnn');
+  const video      = document.getElementById('video');
+  const base       = document.getElementById('base');
+  const draw       = document.getElementById('draw');
+  const stage      = document.getElementById('stage');
+  const noteEl     = document.getElementById('note');
+  const consoleEl  = document.getElementById('console');
+  const themeToggle = document.getElementById('themeToggle');
+
+  // State
+  let stream = null;
+  let isFrozen = false;
+  let rects = [];
+  let dragging = false;
+  let start = null;
+  let nextN = null;
+  let rafId = null;
+
+  const ctxBase = base.getContext('2d');
+  const ctxDraw = draw.getContext('2d');
+
+  // Theme management
+  function initTheme() {
+    // Check for saved theme in localStorage, or default to dark
+    const savedTheme = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = savedTheme || (prefersDark ? 'dark' : 'light');
+    
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('theme', theme);
+  }
+
+  function toggleTheme() {
+    const isDark = document.documentElement.classList.contains('dark');
+    const newTheme = isDark ? 'light' : 'dark';
+    
+    document.documentElement.classList.toggle('dark', newTheme === 'dark');
+    localStorage.setItem('theme', newTheme);
+  }
+
+  // Initialize theme on load
+  initTheme();
+
+  // Theme toggle event listener
+  themeToggle.addEventListener('click', toggleTheme);
+
+  // WebSocket for real-time updates
+  let ws = null;
+  function connectWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => console.log('WebSocket connected');
+    ws.onclose = () => {
+      console.log('WebSocket disconnected, reconnecting...');
+      setTimeout(connectWebSocket, 1000);
+    };
+    ws.onerror = (err) => console.error('WebSocket error:', err);
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        showNotification(msg.type, msg.message);
+        logToConsole(msg.type, msg.message);
+      } catch (e) {
+        console.error('Failed to parse WebSocket message:', e);
+      }
+    };
+  }
+
+  let currentNotification = null;
+  let notificationTimer = null;
+  let startTime = null;
+  let currentIteration = null;
+
+  let currentIterationHeader = null;
+
+  function logToConsole(type, message) {
+    // Clear empty state if present
+    const emptyEl = consoleEl.querySelector('[class*="italic"]');
+    if (emptyEl) emptyEl.remove();
+    
+    const timestamp = new Date().toLocaleTimeString();
+    const typeLabels = {
+      status: '⏳',
+      success: '✅',
+      error: '❌',
+      stats: '📊'
+    };
+    const icon = typeLabels[type] || '📝';
+    
+    // Add header for new iteration
+    if (type === 'status' && message.includes('Running Claude Code') && currentIteration) {
+      const header = document.createElement('div');
+      header.className = 'text-yellow-400 font-semibold border-b border-gray-600 pb-1 mb-2';
+      header.textContent = `=== Iteration ${String(currentIteration).padStart(3, '0')} ===`;
+      consoleEl.appendChild(header);
+      currentIterationHeader = header;
+    }
+    
+    const logEntry = document.createElement('div');
+    logEntry.className = 'mb-1';
+    
+    if (type === 'success' && message.includes('Committed:')) {
+      // Format commit message nicely
+      const commitMsg = message.replace('✅ Committed: ', '').trim();
+      logEntry.innerHTML = `<span class="text-green-400">${icon} [${timestamp}] Committed:</span>\n${commitMsg}`;
+    } else if (type === 'stats') {
+      // Update the iteration header with stats
+      if (currentIterationHeader && currentIteration) {
+        const statsText = message.replace('📊 ', '');
+        currentIterationHeader.textContent = `=== Iteration ${String(currentIteration).padStart(3, '0')} === (${statsText})`;
+      }
+      // Also log as separate entry
+      logEntry.innerHTML = `<span class="text-yellow-400">${icon} [${timestamp}] ${message}</span>`;
+    } else {
+      const colorClass = type === 'error' ? 'text-red-400' : type === 'success' ? 'text-green-400' : 'text-blue-400';
+      logEntry.innerHTML = `<span class="${colorClass}">${icon} [${timestamp}] ${message}</span>`;
+    }
+    
+    consoleEl.appendChild(logEntry);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+
+  function showNotification(type, message) {
+    // Clear existing timer
+    if (notificationTimer) {
+      clearTimeout(notificationTimer);
+      notificationTimer = null;
+    }
+
+    // For status messages, track start time
+    if (type === 'status') {
+      startTime = Date.now();
+    }
+
+    // Remove existing notification
+    if (currentNotification) {
+      currentNotification.remove();
+    }
+
+    // Simplify success messages - just show completion
+    let displayMessage = message;
+    if (type === 'success' && message.includes('Committed:') && currentIteration) {
+      displayMessage = `✅ Iteration ${String(currentIteration).padStart(3, '0')} done!`;
+    }
+
+    // Create notification element
+    const notification = document.createElement('div');
+    notification.className = 'notification';
+    
+    // Style based on type
+    const colors = {
+      status: { bg: '#1e40af', border: '#3b82f6' },
+      success: { bg: '#059669', border: '#10b981' },
+      error: { bg: '#dc2626', border: '#ef4444' }
+    };
+    const color = colors[type] || colors.status;
+    
+    notification.style.cssText = `
+      position: fixed;
+      top: 70px;
+      right: 20px;
+      background: ${color.bg};
+      color: white;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border-left: 4px solid ${color.border};
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      z-index: 1000;
+      font-weight: 500;
+      max-width: 300px;
+      word-wrap: break-word;
+      font-family: system-ui, sans-serif;
+    `;
+
+    // Create content container
+    const content = document.createElement('div');
+    const messageEl = document.createElement('div');
+    messageEl.textContent = displayMessage;
+    content.appendChild(messageEl);
+
+    // Add elapsed time for status messages
+    if (type === 'status') {
+      const timeEl = document.createElement('div');
+      timeEl.style.cssText = 'font-size: 11px; opacity: 0.8; margin-top: 4px;';
+      timeEl.textContent = '0s elapsed';
+      content.appendChild(timeEl);
+      
+      // Update elapsed time every second
+      const updateTimer = () => {
+        if (notification.parentNode && startTime) {
+          const elapsed = Math.floor((Date.now() - startTime) / 1000);
+          timeEl.textContent = `${elapsed}s elapsed`;
+          setTimeout(updateTimer, 1000);
+        }
+      };
+      setTimeout(updateTimer, 1000);
+    }
+
+    // Add final time for success/error messages
+    if ((type === 'success' || type === 'error') && startTime) {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const timeEl = document.createElement('div');
+      timeEl.style.cssText = 'font-size: 11px; opacity: 0.8; margin-top: 4px;';
+      timeEl.textContent = `Completed in ${elapsed}s`;
+      content.appendChild(timeEl);
+      startTime = null; // Reset
+    }
+
+    notification.appendChild(content);
+    document.body.appendChild(notification);
+    currentNotification = notification;
+
+    // Only auto-remove success/error messages (not status)
+    if (type !== 'status') {
+      const delay = 5000; // Shorter delay for simpler messages
+      notificationTimer = setTimeout(() => {
+        if (notification.parentNode) {
+          notification.style.transition = 'opacity 0.3s';
+          notification.style.opacity = '0';
+          setTimeout(() => {
+            notification.remove();
+            if (currentNotification === notification) {
+              currentNotification = null;
+            }
+          }, 300);
+        }
+      }, delay);
+    }
+  }
+
+  // Utils
+  const pad3 = (n) => String(n).padStart(3, '0');
+  function updateNNNBadge(){ nnnBadge.textContent = nextN == null ? '---' : pad3(nextN); }
+
+  async function refreshNext() {
+    try {
+      const r = await fetch('/next');
+      const j = await r.json();
+      nextN = j.next;
+      updateNNNBadge();
+    } catch(_) {}
+  }
+
+  function sizeCanvasesTo(w, h){
+    base.width = draw.width = w; base.height = draw.height = h;
+    base.style.width = draw.style.width = w + 'px';
+    base.style.height = draw.style.height = h + 'px';
+    base.style.left = draw.style.left = '0px';
+    base.style.top = draw.style.top = '0px';
+  }
+
+  function redrawOverlay(){
+    ctxDraw.clearRect(0, 0, draw.width, draw.height);
+    ctxDraw.lineWidth = 2; ctxDraw.strokeStyle = '#ff2d2d';
+    for (const r of rects){ ctxDraw.strokeRect(r.x, r.y, r.w, r.h); }
+    if (nextN != null){
+      ctxDraw.fillStyle = 'rgba(185,28,28,0.9)';
+      ctxDraw.fillRect(8, 8, 140, 30);
+      ctxDraw.fillStyle = 'white';
+      ctxDraw.font = 'bold 18px ui-monospace, monospace';
+      ctxDraw.fillText('iteration-' + pad3(nextN), 14, 28);
+    }
+  }
+
+  function rectFromPoints(a,b){
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    return { x, y, w: Math.abs(a.x-b.x), h: Math.abs(a.y-b.y) };
+  }
+
+  function renderLoop(){
+    if (!isFrozen && stream && video.readyState >= 2){
+      const w = video.videoWidth, h = video.videoHeight;
+      if (w && h && (base.width !== w || base.height !== h)){
+        sizeCanvasesTo(w, h);
+      }
+      if (w && h) ctxBase.drawImage(video, 0, 0, base.width, base.height);
+    }
+    rafId = requestAnimationFrame(renderLoop);
+  }
+
+  // UI handlers
+  btnCapture.addEventListener('click', async () => {
+    try{
+      await refreshNext();
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'browser', preferCurrentTab: true },
+        audio: false
+      });
+      video.srcObject = stream;
+      video.style.display = 'block';
+      btnFreeze.disabled = false;
+    }catch(err){
+      console.error(err);
+      alert('Screen/tab capture was blocked or canceled.');
+    }
+  });
+
+  btnFreeze.addEventListener('click', async () => {
+    if (!stream) return;
+    
+    if (isFrozen) {
+      // Currently frozen, unfreeze to resume live video
+      isFrozen = false;
+      video.style.display = 'block';
+      btnFreeze.textContent = 'Freeze frame';
+      btnClear.disabled = true;
+      btnSave.disabled = true;
+      rects = [];
+      redrawOverlay();
+    } else {
+      // Currently live, freeze the current frame
+      isFrozen = true;
+      const track = stream.getVideoTracks()[0];
+      const settings = track.getSettings();
+      const w = settings.width || video.videoWidth;
+      const h = settings.height || video.videoHeight;
+      sizeCanvasesTo(w, h);
+      ctxBase.drawImage(video, 0, 0, w, h);
+      
+      video.style.display = 'none';
+      btnFreeze.textContent = 'Unfreeze';
+      btnClear.disabled = false;
+      btnSave.disabled = false;
+      rects = [];
+      redrawOverlay();
+    }
+  });
+
+
+  btnClear.addEventListener('click', () => {
+    rects = [];
+    redrawOverlay();
+  });
+
+  btnSave.addEventListener('click', async () => {
+    if (nextN == null) await refreshNext();
+    currentIteration = nextN; // Set for console logging
+
+    // Compose final image: base + rectangles + NNN badge burned in
+    const out = document.createElement('canvas');
+    out.width = base.width; out.height = base.height;
+    const octx = out.getContext('2d');
+    octx.drawImage(base, 0, 0);
+    // draw rects
+    octx.lineWidth = 2;
+    octx.strokeStyle = '#ff2d2d';
+    for (const r of rects) {
+      octx.strokeRect(r.x, r.y, r.w, r.h);
+    }
+    // draw badge
+    octx.fillStyle = 'rgba(185,28,28,0.9)';
+    octx.fillRect(8, 8, 140, 30);
+    octx.fillStyle = 'white';
+    octx.font = 'bold 18px ui-monospace, monospace';
+    octx.fillText('iteration-' + pad3(nextN), 14, 28);
+
+    const pngURL = out.toDataURL('image/png');
+
+    const res = await fetch('/save', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        n: nextN, // tell server which N we used
+        imageDataURL: pngURL,
+        text: noteEl.value || ''
+      })
+    });
+    if (!res.ok) {
+      alert('Save failed');
+      return;
+    }
+    const j = await res.json();
+    // alert('Saved iteration-' + pad3(j.n));
+    // prep for next run
+    await refreshNext();
+    rects = [];
+    noteEl.value = '';
+    redrawOverlay();
+  });
+
+  // Drawing handlers
+  draw.addEventListener('mousedown', (e) => {
+    if (btnSave.disabled) return; // no image yet
+    dragging = true;
+    start = { x: e.offsetX, y: e.offsetY };
+  });
+  draw.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    redrawOverlay();
+    const temp = rectFromPoints(start, { x:e.offsetX, y:e.offsetY });
+    ctxDraw.setLineDash([6,4]); ctxDraw.strokeRect(temp.x, temp.y, temp.w, temp.h); ctxDraw.setLineDash([]);
+  });
+  draw.addEventListener('mouseup', (e) => {
+    if (!dragging) return;
+    dragging = false;
+    const r = rectFromPoints(start, {x:e.offsetX, y:e.offsetY});
+    if (r.w > 2 && r.h > 2) rects.push(r);
+    redrawOverlay();
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && dragging) {
+      dragging = false; redrawOverlay();
+    }
+    
+    // Don't trigger shortcuts when typing in input/textarea elements
+    const activeElement = document.activeElement;
+    if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
+      return;
+    }
+    
+    if (e.key.toLowerCase() === 'f' && stream && !dragging) {
+      e.preventDefault();
+      btnFreeze.click();
+    }
+    if (e.key.toLowerCase() === 's' && !btnSave.disabled && !dragging) {
+      e.preventDefault();
+      btnSave.click();
+    }
+    if (e.key.toLowerCase() === 'c' && !btnClear.disabled && !dragging) {
+      e.preventDefault();
+      btnClear.click();
+    }
+  });
+
+  // Initialize
+  refreshNext();
+  renderLoop();
+  connectWebSocket();
+})();
+</script>
+</body>
+</html>
