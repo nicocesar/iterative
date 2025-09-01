@@ -21,10 +21,23 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 //go:embed web/index.html
 var indexHTML []byte
+
+//go:embed version.txt
+var version string
+
+type Config struct {
+	Version     string `json:"version" mapstructure:"version"`
+	Target      string `json:"target" mapstructure:"target"`
+	Cmd         string `json:"cmd" mapstructure:"cmd"`
+	URL         string `json:"url" mapstructure:"url"`
+	ForceReload bool   `json:"forceReload" mapstructure:"forceReload"`
+}
 
 var (
 	capturesDir = "captures"
@@ -38,6 +51,10 @@ var (
 	clients = make(map[*websocket.Conn]bool)
 	clientsMu sync.Mutex
 )
+
+type IterativeServer struct {
+	config *Config
+}
 
 type wsMessage struct {
 	Type    string `json:"type"`
@@ -86,13 +103,13 @@ func nextNumber() (int, error) {
 
 func pad3(n int) string { return fmt.Sprintf("%03d", n) }
 
-func updateVersionFile(n int) error {
+func updateVersionFile(n int, targetDir string) error {
 	versionContent := fmt.Sprintf("{\"iteration\":\"%d\"}\n", n)
-	versionPath := "frontend/version.json"
+	versionPath := filepath.Join(targetDir, "version.json")
 	
-	// Ensure frontend directory exists
-	if err := os.MkdirAll("frontend", 0o755); err != nil {
-		return fmt.Errorf("failed to create frontend directory: %v", err)
+	// Ensure target directory exists
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
 	}
 	
 	if err := os.WriteFile(versionPath, []byte(versionContent), 0o644); err != nil {
@@ -393,7 +410,7 @@ func broadcastMessage(msgType, message string) {
 	}
 }
 
-func executePostSaveCommands(n int) error {
+func executePostSaveCommands(n int, config *Config) error {
 	startTime := time.Now()
 	stats := executionStats{
 		Iteration: n,
@@ -464,7 +481,7 @@ func executePostSaveCommands(n int) error {
 	}
 
 	// Update version file right before commit
-	if err := updateVersionFile(n); err != nil {
+	if err := updateVersionFile(n, config.Target); err != nil {
 		endTime := time.Now()
 		stats.EndTime = endTime.Format(time.RFC3339)
 		stats.Duration = time.Since(startTime).Seconds()
@@ -477,18 +494,20 @@ func executePostSaveCommands(n int) error {
 		return fmt.Errorf("failed to update version file: %v", err)
 	}
 	
-	// Add all files in frontend/src directory (new and modified)
-	if _, err := os.Stat("frontend/src"); err == nil {
-		gitAddCmd := exec.Command("git", "add", "frontend/src/")
+	// Add all files in target/src directory (new and modified)
+	targetSrcDir := filepath.Join(config.Target, "src")
+	if _, err := os.Stat(targetSrcDir); err == nil {
+		gitAddCmd := exec.Command("git", "add", targetSrcDir+"/")
 		addOutput, err := gitAddCmd.CombinedOutput()
 		if err != nil {
-			// Log but don't fail - might be no frontend/src changes
-			log.Printf("Git add frontend/src warning: %v, output: %s", err, string(addOutput))
+			// Log but don't fail - might be no target/src changes
+			log.Printf("Git add %s warning: %v, output: %s", targetSrcDir, err, string(addOutput))
 		}
 	}
 	
 	// Add captures directory and version file explicitly
-	gitAddCapturesCmd := exec.Command("git", "add", "frontend/version.json")
+	versionFilePath := filepath.Join(config.Target, "version.json")
+	gitAddCapturesCmd := exec.Command("git", "add", versionFilePath)
 	capturesOutput, err := gitAddCapturesCmd.CombinedOutput()
 	if err != nil {
 		log.Printf("Git add captures warning: %v, output: %s", err, string(capturesOutput))
@@ -608,7 +627,7 @@ type saveResp struct {
 	N int `json:"n"`
 }
 
-func handleSave(w http.ResponseWriter, r *http.Request) {
+func (s *IterativeServer) handleSave(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
 		return
@@ -677,7 +696,7 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 
 	// Execute post-save commands (Claude Code + git commit)
 	go func() {
-		if err := executePostSaveCommands(n); err != nil {
+		if err := executePostSaveCommands(n, s.config); err != nil {
 			log.Printf("Post-save commands failed: %v", err)
 		} else {
 			log.Printf("Post-save commands completed successfully for iteration-%s", pad3(n))
@@ -688,19 +707,149 @@ func handleSave(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(saveResp{N: n})
 }
 
-func main() {
+func loadConfig(configDir string) (*Config, error) {
+	configPath := filepath.Join(configDir, "iterative.config.json")
+	
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("no iterative.config.json found in %s. Run 'iterative init' to create one", configDir)
+	}
+	
+	viper.SetConfigName("iterative.config")
+	viper.SetConfigType("json")
+	viper.AddConfigPath(configDir)
+	
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("failed to read config: %v", err)
+	}
+	
+	var config Config
+	if err := viper.Unmarshal(&config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
+	}
+	
+	return &config, nil
+}
+
+func createDefaultConfig(dir string) error {
+	configPath := filepath.Join(dir, "iterative.config.json")
+	
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("iterative.config.json already exists in %s", dir)
+	}
+	
+	defaultConfig := Config{
+		Version:     "1",
+		Target:      ".",
+		Cmd:         "npm run dev",
+		URL:         "http://localhost:5173",
+		ForceReload: false,
+	}
+	
+	configJSON, err := json.MarshalIndent(defaultConfig, "", "\t")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %v", err)
+	}
+	
+	if err := os.WriteFile(configPath, configJSON, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %v", err)
+	}
+	
+	fmt.Printf("Created iterative.config.json in %s\n", dir)
+	return nil
+}
+
+func runServer(config *Config, targetDir string) error {
+	// Change to target directory
+	if err := os.Chdir(targetDir); err != nil {
+		return fmt.Errorf("failed to change to target directory %s: %v", targetDir, err)
+	}
+	
 	// Ensure we can write to captures dir
 	if err := os.MkdirAll(capturesDir, fs.FileMode(0o755)); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("failed to create captures directory: %v", err)
 	}
 
+	server := &IterativeServer{config: config}
+	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.HandleFunc("/next", handleNext)
-	mux.HandleFunc("/save", handleSave)
+	mux.HandleFunc("/save", server.handleSave)
 
 	addr := ":8787"
 	log.Printf("Nico Cesar's iterative running at http://localhost%s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Printf("Target directory: %s", targetDir)
+	log.Printf("Config: cmd=%s, url=%s", config.Cmd, config.URL)
+	return http.ListenAndServe(addr, mux)
+}
+
+func main() {
+	var rootCmd = &cobra.Command{
+		Use:     "iterative",
+		Short:   "Iterative development tool with Claude Code integration",
+		Version: strings.TrimSpace(version),
+	}
+
+	var serveCmd = &cobra.Command{
+		Use:   "serve [directory]",
+		Short: "Start the iterative server",
+		Long:  "Start the iterative server. Directory parameter specifies where to look for iterative.config.json (default: current directory)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configDir := "."
+			if len(args) > 0 {
+				configDir = args[0]
+			}
+			
+			absConfigDir, err := filepath.Abs(configDir)
+			if err != nil {
+				return fmt.Errorf("failed to get absolute path for config directory: %v", err)
+			}
+			
+			config, err := loadConfig(absConfigDir)
+			if err != nil {
+				return err
+			}
+			
+			targetDir := config.Target
+			if !filepath.IsAbs(targetDir) {
+				targetDir = filepath.Join(absConfigDir, targetDir)
+			}
+			
+			absTargetDir, err := filepath.Abs(targetDir)
+			if err != nil {
+				return fmt.Errorf("failed to get absolute path for target directory: %v", err)
+			}
+			
+			return runServer(config, absTargetDir)
+		},
+	}
+
+	var initCmd = &cobra.Command{
+		Use:   "init [directory]",
+		Short: "Initialize a new iterative project",
+		Long:  "Create a new iterative.config.json file in the specified directory (default: current directory)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) > 0 {
+				dir = args[0]
+			}
+			
+			absDir, err := filepath.Abs(dir)
+			if err != nil {
+				return fmt.Errorf("failed to get absolute path: %v", err)
+			}
+			
+			return createDefaultConfig(absDir)
+		},
+	}
+
+	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(initCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal(err)
+	}
 }
