@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -34,6 +35,9 @@ var indexHTML []byte
 //go:embed version.txt
 var version string
 
+//go:embed claude-prompt.tpl
+var claudePromptTpl string
+
 type Config struct {
 	Version     string `json:"version" mapstructure:"version"`
 	Target      string `json:"target" mapstructure:"target"`
@@ -45,7 +49,6 @@ type Config struct {
 var (
 	capturesDir = "captures"
 	counterMu   sync.Mutex
-	claudePrompt = "take a look into @captures/  each iteration will make you do something, the txt file is the png is the screen capture with red rectangles to pay attention to. Choose the latest iteration always"
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true // Allow connections from any origin
@@ -378,6 +381,20 @@ func getKeys(m map[string]interface{}) []string {
 	return keys
 }
 
+func renderClaudePrompt(config *Config) (string, error) {
+	tmpl, err := template.New("claude-prompt").Parse(claudePromptTpl)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse claude prompt template: %v", err)
+	}
+	
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, config); err != nil {
+		return "", fmt.Errorf("failed to execute claude prompt template: %v", err)
+	}
+	
+	return buf.String(), nil
+}
+
 func extractCostFromResponse(response map[string]interface{}) float64 {
 	// Try various possible locations for cost data
 	if totalCost, ok := response["totalCost"].(float64); ok {
@@ -610,7 +627,23 @@ func executePostSaveCommands(n int, config *Config) error {
 
 	broadcastMessage("status", fmt.Sprintf("🤖 Running iteration %s...", pad3(n)))
 	
-	claudeCmd := exec.Command("npx", "@anthropic-ai/claude-code", "--allowedTools", "Read", "--permission-mode", "acceptEdits", "-p", claudePrompt)
+	// Render the Claude prompt template
+	renderedPrompt, err := renderClaudePrompt(config)
+	if err != nil {
+		endTime := time.Now()
+		stats.EndTime = endTime.Format(time.RFC3339)
+		stats.Duration = time.Since(startTime).Seconds()
+		stats.Error = fmt.Sprintf("Failed to render Claude prompt: %v", err)
+		
+		saveExecutionStats(stats)
+		
+		errorMsg := fmt.Sprintf("Failed to render Claude prompt: %v", err)
+		log.Printf("Claude prompt template error: %s", errorMsg)
+		broadcastMessage("error", errorMsg)
+		return fmt.Errorf("failed to render Claude prompt: %v", err)
+	}
+	
+	claudeCmd := exec.Command("npx", "@anthropic-ai/claude-code", "--allowedTools", "Read", "--permission-mode", "acceptEdits", "-p", renderedPrompt)
 	output, err := claudeCmd.CombinedOutput()
 	
 	if err != nil {

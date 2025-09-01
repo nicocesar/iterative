@@ -1,0 +1,1 @@
+take a look into @captures/ each iteration will make you do something, the txt file is the png is the screen capture with red rectangles to pay attention to. Choose the latest iteration always. There will also be log files to examine the output of the command {{.Cmd}}. The app should be running at {{.URL}}.
