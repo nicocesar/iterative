@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -12,12 +13,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -52,8 +55,18 @@ var (
 	clientsMu sync.Mutex
 )
 
+type ProcessManager struct {
+	cmd           *exec.Cmd
+	currentLogNum int
+	logFile       *os.File
+	mu            sync.Mutex
+	running       bool
+	config        *Config
+}
+
 type IterativeServer struct {
-	config *Config
+	config         *Config
+	processManager *ProcessManager
 }
 
 type wsMessage struct {
@@ -410,6 +423,183 @@ func broadcastMessage(msgType, message string) {
 	}
 }
 
+func (pm *ProcessManager) startProcess() error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if pm.running {
+		return nil
+	}
+
+	// Get the current iteration number for the log file
+	iterNum, err := nextNumber()
+	if err != nil {
+		return fmt.Errorf("failed to get iteration number: %v", err)
+	}
+	pm.currentLogNum = iterNum
+
+	// Create log file
+	logPath := filepath.Join(capturesDir, fmt.Sprintf("iteration-%s.log", pad3(pm.currentLogNum)))
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return fmt.Errorf("failed to create log file %s: %v", logPath, err)
+	}
+	pm.logFile = logFile
+
+	// Parse the command (handle shell commands with arguments)
+	cmdParts := strings.Fields(pm.config.Cmd)
+	if len(cmdParts) == 0 {
+		return fmt.Errorf("empty command")
+	}
+
+	// Create the command
+	pm.cmd = exec.Command(cmdParts[0], cmdParts[1:]...)
+	pm.cmd.Stdout = logFile
+	pm.cmd.Stderr = logFile
+
+	// Start the process
+	if err := pm.cmd.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("failed to start command '%s': %v", pm.config.Cmd, err)
+	}
+
+	pm.running = true
+	
+	log.Printf("Started process: %s (PID: %d) -> %s", pm.config.Cmd, pm.cmd.Process.Pid, logPath)
+	broadcastMessage("process", fmt.Sprintf("✅ Started: %s (PID: %d)", pm.config.Cmd, pm.cmd.Process.Pid))
+
+	// Monitor the process in a goroutine
+	go pm.monitorProcess()
+
+	return nil
+}
+
+func (pm *ProcessManager) monitorProcess() {
+	if pm.cmd == nil || pm.cmd.Process == nil {
+		return
+	}
+
+	err := pm.cmd.Wait()
+	
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	
+	pm.running = false
+	if pm.logFile != nil {
+		pm.logFile.Close()
+		pm.logFile = nil
+	}
+
+	if err != nil {
+		log.Printf("Process '%s' (PID: %d) exited with error: %v", pm.config.Cmd, pm.cmd.Process.Pid, err)
+		broadcastMessage("process", fmt.Sprintf("❌ Process crashed: %s (PID: %d) - %v", pm.config.Cmd, pm.cmd.Process.Pid, err))
+		
+		// Auto-restart if not forceReload
+		if !pm.config.ForceReload {
+			log.Printf("Auto-restarting process...")
+			broadcastMessage("process", "🔄 Auto-restarting process...")
+			if restartErr := pm.startProcess(); restartErr != nil {
+				log.Printf("Failed to restart process: %v", restartErr)
+				broadcastMessage("process", fmt.Sprintf("❌ Failed to restart: %v", restartErr))
+			}
+		}
+	} else {
+		log.Printf("Process '%s' (PID: %d) exited normally", pm.config.Cmd, pm.cmd.Process.Pid)
+		broadcastMessage("process", fmt.Sprintf("✅ Process exited normally: %s (PID: %d)", pm.config.Cmd, pm.cmd.Process.Pid))
+	}
+}
+
+func (pm *ProcessManager) switchToNextLogFile() error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if !pm.running {
+		return nil
+	}
+
+	// Close current log file
+	if pm.logFile != nil {
+		pm.logFile.Close()
+	}
+
+	// Get next iteration number
+	iterNum, err := nextNumber()
+	if err != nil {
+		return fmt.Errorf("failed to get next iteration number: %v", err)
+	}
+	pm.currentLogNum = iterNum
+
+	// Create new log file
+	logPath := filepath.Join(capturesDir, fmt.Sprintf("iteration-%s.log", pad3(pm.currentLogNum)))
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return fmt.Errorf("failed to create new log file %s: %v", logPath, err)
+	}
+	pm.logFile = logFile
+
+	// Redirect process output to new log file
+	// Note: This is tricky with running processes. We'll write a log entry about the switch.
+	timestamp := time.Now().Format(time.RFC3339)
+	switchMsg := fmt.Sprintf("\n[%s] === Switched to iteration-%s.log ===\n", timestamp, pad3(pm.currentLogNum))
+	pm.logFile.WriteString(switchMsg)
+
+	log.Printf("Switched process output to: %s", logPath)
+	broadcastMessage("process", fmt.Sprintf("📝 Switched to log: iteration-%s.log", pad3(pm.currentLogNum)))
+
+	return nil
+}
+
+func (pm *ProcessManager) restartProcess() error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// Stop current process if running
+	if pm.running && pm.cmd != nil && pm.cmd.Process != nil {
+		log.Printf("Stopping process (PID: %d) for restart", pm.cmd.Process.Pid)
+		pm.cmd.Process.Kill()
+		pm.cmd.Wait() // Wait for cleanup
+		pm.running = false
+	}
+
+	// Close current log file
+	if pm.logFile != nil {
+		pm.logFile.Close()
+		pm.logFile = nil
+	}
+
+	pm.mu.Unlock()
+	// Start new process (this will handle its own locking)
+	return pm.startProcess()
+}
+
+func (pm *ProcessManager) stop() error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if !pm.running || pm.cmd == nil || pm.cmd.Process == nil {
+		return nil
+	}
+
+	log.Printf("Stopping process (PID: %d)", pm.cmd.Process.Pid)
+	broadcastMessage("process", fmt.Sprintf("🛑 Stopping process (PID: %d)", pm.cmd.Process.Pid))
+	
+	err := pm.cmd.Process.Kill()
+	if err != nil {
+		log.Printf("Failed to kill process: %v", err)
+		return err
+	}
+
+	pm.cmd.Wait() // Wait for cleanup
+	pm.running = false
+
+	if pm.logFile != nil {
+		pm.logFile.Close()
+		pm.logFile = nil
+	}
+
+	return nil
+}
+
 func executePostSaveCommands(n int, config *Config) error {
 	startTime := time.Now()
 	stats := executionStats{
@@ -694,8 +884,22 @@ func (s *IterativeServer) handleSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 
-	// Execute post-save commands (Claude Code + git commit)
+	// Handle process management for new iteration
 	go func() {
+		// Handle forceReload logic
+		if s.config.ForceReload {
+			// Restart the process for each iteration
+			if err := s.processManager.restartProcess(); err != nil {
+				log.Printf("Failed to restart process for iteration: %v", err)
+			}
+		} else {
+			// Just switch to next log file, keep process running
+			if err := s.processManager.switchToNextLogFile(); err != nil {
+				log.Printf("Failed to switch log file for iteration: %v", err)
+			}
+		}
+		
+		// Execute post-save commands (Claude Code + git commit)
 		if err := executePostSaveCommands(n, s.config); err != nil {
 			log.Printf("Post-save commands failed: %v", err)
 		} else {
@@ -769,7 +973,21 @@ func runServer(config *Config, targetDir string) error {
 		return fmt.Errorf("failed to create captures directory: %v", err)
 	}
 
-	server := &IterativeServer{config: config}
+	// Create process manager
+	processManager := &ProcessManager{
+		config: config,
+	}
+
+	server := &IterativeServer{
+		config:         config,
+		processManager: processManager,
+	}
+	
+	// Start the initial process
+	if err := processManager.startProcess(); err != nil {
+		log.Printf("Failed to start initial process: %v", err)
+		broadcastMessage("process", fmt.Sprintf("❌ Failed to start process: %v", err))
+	}
 	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
@@ -777,11 +995,50 @@ func runServer(config *Config, targetDir string) error {
 	mux.HandleFunc("/next", handleNext)
 	mux.HandleFunc("/save", server.handleSave)
 
-	addr := ":8787"
-	log.Printf("Nico Cesar's iterative running at http://localhost%s", addr)
-	log.Printf("Target directory: %s", targetDir)
-	log.Printf("Config: cmd=%s, url=%s", config.Cmd, config.URL)
-	return http.ListenAndServe(addr, mux)
+	// Setup HTTP server with graceful shutdown
+	httpServer := &http.Server{
+		Addr:    ":8787",
+		Handler: mux,
+	}
+	
+	// Handle shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	// Start server in goroutine
+	serverErrChan := make(chan error, 1)
+	go func() {
+		log.Printf("Nico Cesar's iterative running at http://localhost:8787")
+		log.Printf("Target directory: %s", targetDir)
+		log.Printf("Config: cmd=%s, url=%s, forceReload=%t", config.Cmd, config.URL, config.ForceReload)
+		serverErrChan <- httpServer.ListenAndServe()
+	}()
+	
+	// Wait for shutdown signal or server error
+	select {
+	case err := <-serverErrChan:
+		if err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+	case sig := <-sigChan:
+		log.Printf("Received signal %s, shutting down gracefully...", sig)
+	}
+	
+	// Graceful shutdown
+	log.Printf("Stopping process manager...")
+	if err := processManager.stop(); err != nil {
+		log.Printf("Error stopping process: %v", err)
+	}
+	
+	log.Printf("Shutting down HTTP server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+	
+	return nil
 }
 
 func main() {
