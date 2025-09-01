@@ -488,7 +488,7 @@ func executePostSaveCommands(n int) error {
 	}
 	
 	// Add captures directory and version file explicitly
-	gitAddCapturesCmd := exec.Command("git", "add", "captures/", "frontend/version.js")
+	gitAddCapturesCmd := exec.Command("git", "add", "frontend/version.json")
 	capturesOutput, err := gitAddCapturesCmd.CombinedOutput()
 	if err != nil {
 		log.Printf("Git add captures warning: %v, output: %s", err, string(capturesOutput))
