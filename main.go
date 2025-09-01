@@ -1041,6 +1041,59 @@ func runServer(config *Config, targetDir string) error {
 	return nil
 }
 
+func performSanityChecks(targetDir string) error {
+	log.Printf("Performing sanity checks...")
+	
+	// Check git installation
+	gitCmd := exec.Command("git", "--version")
+	gitOutput, err := gitCmd.Output()
+	if err != nil {
+		return fmt.Errorf("git is not installed or not available in PATH: %v", err)
+	}
+	gitVersion := strings.TrimSpace(string(gitOutput))
+	log.Printf("✓ Git check passed: %s", gitVersion)
+	
+	// Check if target directory is a git repository
+	gitDirCheck := exec.Command("git", "rev-parse", "--git-dir")
+	gitDirCheck.Dir = targetDir
+	_, err = gitDirCheck.Output()
+	if err != nil {
+		log.Printf("⚠ Target directory is not a git repository: %s", targetDir)
+		
+		// Prompt user to initialize git repository
+		fmt.Print("Would you like to initialize a git repository? (y/N): ")
+		var response string
+		fmt.Scanln(&response)
+		
+		if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
+			log.Printf("Initializing git repository in %s...", targetDir)
+			gitInitCmd := exec.Command("git", "init")
+			gitInitCmd.Dir = targetDir
+			initOutput, initErr := gitInitCmd.CombinedOutput()
+			if initErr != nil {
+				return fmt.Errorf("failed to initialize git repository: %v\nOutput: %s", initErr, string(initOutput))
+			}
+			log.Printf("✓ Git repository initialized successfully")
+		} else {
+			return fmt.Errorf("git repository is required for iterative development (commits are made automatically)")
+		}
+	} else {
+		log.Printf("✓ Git repository check passed")
+	}
+	
+	// Check Claude Code availability
+	claudeCmd := exec.Command("npx", "@anthropic-ai/claude-code", "--version")
+	claudeOutput, err := claudeCmd.Output()
+	if err != nil {
+		return fmt.Errorf("Claude Code is not available (try: npm install -g @anthropic-ai/claude-code): %v", err)
+	}
+	claudeVersion := strings.TrimSpace(string(claudeOutput))
+	log.Printf("✓ Claude Code check passed: %s", claudeVersion)
+	
+	log.Printf("All sanity checks passed!")
+	return nil
+}
+
 func main() {
 	var rootCmd = &cobra.Command{
 		Use:     "iterative",
@@ -1077,6 +1130,11 @@ func main() {
 			absTargetDir, err := filepath.Abs(targetDir)
 			if err != nil {
 				return fmt.Errorf("failed to get absolute path for target directory: %v", err)
+			}
+			
+			// Perform sanity checks with the target directory
+			if err := performSanityChecks(absTargetDir); err != nil {
+				return fmt.Errorf("sanity check failed: %v", err)
 			}
 			
 			return runServer(config, absTargetDir)
